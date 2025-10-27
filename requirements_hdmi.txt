@@ -1,0 +1,16 @@
+# HDMI Cable Tester - Python Dependencies
+
+# Windows-specific dependencies (install on Windows only)
+pywin32>=305; sys_platform == 'win32'
+wmi>=1.5.1; sys_platform == 'win32'
+
+# Cross-platform dependencies
+Pillow>=10.0.0
+
+# Optional: For enhanced reporting
+# matplotlib>=3.7.0
+# pandas>=2.0.0
+
+# Note: For WSL/Linux, also install system packages:
+# sudo apt-get install x11-xserver-utils
+# sudo apt-get install edid-decode (optional, for detailed EDID parsing)
