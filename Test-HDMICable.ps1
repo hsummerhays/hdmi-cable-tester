@@ -28,6 +28,13 @@ param(
     [int]$StabilityTestDuration = 10
 )
 
+# Set UTF-8 encoding to ensure emojis display correctly
+$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+
 # Ensure running with appropriate privileges
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
@@ -35,6 +42,23 @@ if (-not $isAdmin) {
     Write-Warning "Not running as Administrator. Some tests may have limited functionality."
     Write-Host "For best results, run PowerShell as Administrator" -ForegroundColor Yellow
     Write-Host ""
+}
+
+# Emoji enum
+enum Emoji {
+    # You must use explicit hex values for the Unicode codepoints
+    TV = 0x1F4FA
+    Ruler = 0x1F4D0
+    Refresh = 0x1F504
+    Satellite = 0x1F4E1
+    Rocket = 0x1F680
+    MagnifyingGlass = 0x1F50D
+    BarChart = 0x1F4CA
+    FloppyDisk = 0x1F4BE
+    Warning = 0x26A0
+    Sparkles = 0x2728
+    CheckMark = 0x2713
+    BallotX = 0x2717
 }
 
 # Test results object
@@ -47,20 +71,25 @@ $script:TestResults = @{
     OverallQuality = "Unknown"
 }
 
+function Get-Emoji {
+    param([Emoji]$Icon)
+    return [char]::ConvertFromUtf32([int]$Icon)
+}
+
 function Write-Header {
     Clear-Host
-    Write-Host "=" * 70 -ForegroundColor Cyan
+    Write-Host $("=" * 70) -ForegroundColor Cyan
     Write-Host "HDMI CABLE QUALITY TESTER" -ForegroundColor Cyan
-    Write-Host "=" * 70 -ForegroundColor Cyan
+    Write-Host $("=" * 70) -ForegroundColor Cyan
     Write-Host "Platform: Windows"
     Write-Host "Test Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
     Write-Host "Administrator: $isAdmin"
-    Write-Host "=" * 70 -ForegroundColor Cyan
+    Write-Host $("=" * 70) -ForegroundColor Cyan
     Write-Host ""
 }
 
 function Get-DisplayInformation {
-    Write-Host "📺 Detecting connected displays..." -ForegroundColor Green
+    Write-Host "$(Get-Emoji TV) Detecting connected displays..." -ForegroundColor Green
 
     $displays = @()
 
@@ -96,7 +125,7 @@ function Get-DisplayInformation {
         Write-Host "  Found $($displays.Count) display(s)" -ForegroundColor Green
 
         foreach ($display in $displays) {
-            Write-Host "  • $($display.FriendlyName)" -ForegroundColor White
+            Write-Host "  - $($display.FriendlyName)" -ForegroundColor White
             Write-Host "    Manufacturer: $($display.Manufacturer)" -ForegroundColor Gray
             Write-Host "    Current: $($display.CurrentResolution)" -ForegroundColor Gray
         }
@@ -121,7 +150,7 @@ function Get-DisplayInformation {
 }
 
 function Test-ResolutionSupport {
-    Write-Host "`n📐 Testing resolution support..." -ForegroundColor Green
+    Write-Host "`n$(Get-Emoji Ruler) Testing resolution support..." -ForegroundColor Green
 
     $testResult = @{
         TestName = "Resolution Support Test"
@@ -208,7 +237,7 @@ function Test-ResolutionSupport {
         }
 
         if ($supported) {
-            Write-Host " ✓ Supported" -ForegroundColor Green
+            Write-Host " $(Get-Emoji CheckMark) Supported" -ForegroundColor Green
             $testResult.ResolutionsTested += @{
                 Resolution = "$($resolution.Width)x$($resolution.Height)"
                 Name = $resolution.Name
@@ -216,7 +245,7 @@ function Test-ResolutionSupport {
                 AvailableRefreshRates = ($supported | Select-Object -ExpandProperty Frequency -Unique)
             }
         } else {
-            Write-Host " ✗ Not supported" -ForegroundColor Red
+            Write-Host " $(Get-Emoji BallotX) Not supported" -ForegroundColor Red
             $testResult.ResolutionsTested += @{
                 Resolution = "$($resolution.Width)x$($resolution.Height)"
                 Name = $resolution.Name
@@ -230,7 +259,7 @@ function Test-ResolutionSupport {
 }
 
 function Test-RefreshRates {
-    Write-Host "`n🔄 Testing refresh rate support..." -ForegroundColor Green
+    Write-Host "`n$(Get-Emoji Refresh) Testing refresh rate support..." -ForegroundColor Green
 
     $testResult = @{
         TestName = "Refresh Rate Test"
@@ -258,13 +287,13 @@ function Test-RefreshRates {
         Write-Host "  Testing ${rate}Hz..." -NoNewline
 
         if ($rate -in $availableRates) {
-            Write-Host " ✓ Supported" -ForegroundColor Green
+            Write-Host " $(Get-Emoji CheckMark) Supported" -ForegroundColor Green
             $testResult.RefreshRatesTested += @{
                 RefreshRate = "${rate}Hz"
                 Supported = $true
             }
         } else {
-            Write-Host " ✗ Not supported" -ForegroundColor Yellow
+            Write-Host " $(Get-Emoji BallotX) Not supported" -ForegroundColor Yellow
             $testResult.RefreshRatesTested += @{
                 RefreshRate = "${rate}Hz"
                 Supported = $false
@@ -281,7 +310,7 @@ function Test-RefreshRates {
 function Test-SignalStability {
     param([int]$Duration = 10)
 
-    Write-Host "`n📡 Testing signal stability ($Duration seconds)..." -ForegroundColor Green
+    Write-Host "`n$(Get-Emoji Satellite) Testing signal stability ($Duration seconds)..." -ForegroundColor Green
 
     $testResult = @{
         TestName = "Signal Stability Test"
@@ -294,8 +323,8 @@ function Test-SignalStability {
     Write-Host "  Monitoring for disconnections and errors..."
 
     for ($i = 1; $i -le $Duration; $i++) {
-        $progress = "█" * $i + "░" * ($Duration - $i)
-        Write-Host "`r  Progress: $progress $i/${Duration}s" -NoNewline
+        $progress = "#" * $i + "-" * ($Duration - $i)
+        Write-Host "`r  Progress: [$progress] $i/${Duration}s" -NoNewline
 
         try {
             $monitorCount = (Get-CimInstance -ClassName Win32_DesktopMonitor -ErrorAction SilentlyContinue | Measure-Object).Count
@@ -322,9 +351,9 @@ function Test-SignalStability {
     Write-Host ""
 
     if ($testResult.Passed) {
-        Write-Host "  ✓ No disconnections detected" -ForegroundColor Green
+        Write-Host "  $(Get-Emoji CheckMark) No disconnections detected" -ForegroundColor Green
     } else {
-        Write-Host "  ✗ Disconnections or errors detected!" -ForegroundColor Red
+        Write-Host "  $(Get-Emoji BallotX) Disconnections or errors detected!" -ForegroundColor Red
     }
 
     $script:TestResults.Tests += $testResult
@@ -356,7 +385,7 @@ function Get-BandwidthRequirement {
 }
 
 function Test-BandwidthCapabilities {
-    Write-Host "`n🚀 Analyzing bandwidth requirements..." -ForegroundColor Green
+    Write-Host "`n$(Get-Emoji Rocket) Analyzing bandwidth requirements..." -ForegroundColor Green
 
     $testResult = @{
         TestName = "Bandwidth Analysis"
@@ -393,9 +422,9 @@ function Test-BandwidthCapabilities {
             }
         }
 
-        $hdmi14 = if ($bandwidth -le 10.2) { "✓" } else { "✗" }
-        $hdmi20 = if ($bandwidth -le 18.0) { "✓" } else { "✗" }
-        $hdmi21 = if ($bandwidth -le 48.0) { "✓" } else { "✗" }
+        $hdmi14 = if ($bandwidth -le 10.2) { Get-Emoji CheckMark } else { Get-Emoji BallotX }
+        $hdmi20 = if ($bandwidth -le 18.0) { Get-Emoji CheckMark } else { Get-Emoji BallotX }
+        $hdmi21 = if ($bandwidth -le 48.0) { Get-Emoji CheckMark } else { Get-Emoji BallotX }
 
         $nameFormatted = $scenario.Name.PadRight(20)
         $bandwidthFormatted = ("{0:N2} Gbps" -f $bandwidth).PadLeft(12)
@@ -414,7 +443,7 @@ function Test-BandwidthCapabilities {
 }
 
 function Get-CableQualityAssessment {
-    Write-Host "`n🔍 Assessing cable quality..." -ForegroundColor Green
+    Write-Host "`n$(Get-Emoji MagnifyingGlass) Assessing cable quality..." -ForegroundColor Green
 
     $totalTests = $script:TestResults.Tests.Count
     $passedTests = ($script:TestResults.Tests | Where-Object { $_.Passed -eq $true }).Count
@@ -437,7 +466,7 @@ function Get-CableQualityAssessment {
 
 function Show-TestReport {
     Write-Host "`n$("=" * 70)" -ForegroundColor Cyan
-    Write-Host "HDMI CABLE TEST REPORT" -ForegroundColor Cyan
+    Write-Host "$(Get-Emoji BarChart) HDMI CABLE TEST REPORT" -ForegroundColor Cyan
     Write-Host "$("=" * 70)" -ForegroundColor Cyan
 
     Write-Host "`nTest Date: $($script:TestResults.Timestamp)"
@@ -456,7 +485,7 @@ function Show-TestReport {
     Write-Host $script:TestResults.OverallQuality -ForegroundColor $qualityColor
 
     Write-Host "`n$("-" * 70)"
-    Write-Host "`n📺 DETECTED DISPLAYS:" -ForegroundColor Green
+    Write-Host "`n$(Get-Emoji TV) DETECTED DISPLAYS:" -ForegroundColor Green
 
     $displayNum = 1
     foreach ($display in $script:TestResults.Displays) {
@@ -470,13 +499,13 @@ function Show-TestReport {
     }
 
     Write-Host "`n$("-" * 70)"
-    Write-Host "`n📊 TEST RESULTS:" -ForegroundColor Green
+    Write-Host "`n$(Get-Emoji BarChart) TEST RESULTS:" -ForegroundColor Green
 
     foreach ($test in $script:TestResults.Tests) {
-        $status = if ($test.Passed -eq $true) { "✓ PASSED" } else { "⚠ INFO" }
+        $status = if ($test.Passed -eq $true) { "$(Get-Emoji CheckMark) PASSED" } else { "$(Get-Emoji Warning) INFO" }
         $statusColor = if ($test.Passed -eq $true) { "Green" } else { "Yellow" }
 
-        Write-Host "`n  • $($test.TestName)"
+        Write-Host "`n  - $($test.TestName)"
         Write-Host "    Status: " -NoNewline
         Write-Host $status -ForegroundColor $statusColor
         Write-Host "    Time: $($test.Timestamp)"
@@ -490,7 +519,7 @@ function Save-TestReport {
 
     try {
         $script:TestResults | ConvertTo-Json -Depth 10 | Out-File -FilePath $Path -Encoding UTF8
-        Write-Host "`n💾 Report saved to: $Path" -ForegroundColor Green
+        Write-Host "`n$(Get-Emoji FloppyDisk) Report saved to: $Path" -ForegroundColor Green
         return $true
     } catch {
         Write-Warning "Failed to save report: $_"
@@ -503,15 +532,15 @@ function Start-HDMICableTest {
     Write-Header
 
     Write-Host "This tool will test your HDMI cable quality by:" -ForegroundColor White
-    Write-Host "  • Detecting connected displays"
-    Write-Host "  • Testing resolution support"
-    Write-Host "  • Testing refresh rate support"
-    Write-Host "  • Analyzing bandwidth capabilities"
-    Write-Host "  • Monitoring signal stability"
+    Write-Host "  - Detecting connected displays"
+    Write-Host "  - Testing resolution support"
+    Write-Host "  - Testing refresh rate support"
+    Write-Host "  - Analyzing bandwidth capabilities"
+    Write-Host "  - Monitoring signal stability"
     Write-Host ""
 
     if (-not $isAdmin) {
-        Write-Host "⚠ Note: Running without Administrator privileges" -ForegroundColor Yellow
+        Write-Host "$(Get-Emoji Warning) Note: Running without Administrator privileges" -ForegroundColor Yellow
         Write-Host "  Some tests may have limited functionality" -ForegroundColor Yellow
         Write-Host ""
     }
@@ -525,7 +554,7 @@ function Start-HDMICableTest {
     Test-BandwidthCapabilities
 
     # Signal stability test
-    Write-Host "`n⚠ Signal stability test will take $StabilityTestDuration seconds..." -ForegroundColor Yellow
+    Write-Host "`n$(Get-Emoji Warning) Signal stability test will take $StabilityTestDuration seconds..." -ForegroundColor Yellow
     $response = Read-Host "  Run stability test? (y/n)"
     if ($response -eq 'y' -or $response -eq 'Y') {
         Test-SignalStability -Duration $StabilityTestDuration
@@ -539,15 +568,16 @@ function Start-HDMICableTest {
 
     # Save report
     if ($SaveReport) {
+        Write-Host "`n$(Get-Emoji FloppyDisk) Saving report to: $ReportPath" -ForegroundColor Green
         Save-TestReport -Path $ReportPath
     } else {
-        $response = Read-Host "`n💾 Save report to file? (y/n)"
+        $response = Read-Host "`n$(Get-Emoji FloppyDisk) Save report to file? (y/n)"
         if ($response -eq 'y' -or $response -eq 'Y') {
             Save-TestReport -Path $ReportPath
         }
     }
 
-    Write-Host "`n✨ Testing complete!" -ForegroundColor Green
+    Write-Host "`n$(Get-Emoji Sparkles) Testing complete!" -ForegroundColor Green
 
     return $script:TestResults
 }
