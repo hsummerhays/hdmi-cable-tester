@@ -28,7 +28,8 @@ pip install pywin32 wmi pillow
 **WSL/Linux:**
 ```bash
 sudo apt-get install x11-xserver-utils
-pip install pillow
+sudo apt install python3-pip
+sudo apt install python3-pil
 ```
 
 #### Usage
