@@ -88,10 +88,119 @@ function Write-Header {
     Write-Host ""
 }
 
+# Define DisplayHelper class at script level so it's available to all functions
+# Check if type already exists (from previous run in same session)
+if (-not ([System.Management.Automation.PSTypeName]'DisplayHelper').Type) {
+    Add-Type @"
+        using System;
+        using System.Runtime.InteropServices;
+
+        public class DisplayHelper {
+            [DllImport("user32.dll")]
+            public static extern int EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
+
+            [DllImport("user32.dll")]
+            public static extern bool EnumDisplayDevices(string lpDevice, uint iDevNum, ref DISPLAY_DEVICE lpDisplayDevice, uint dwFlags);
+
+            [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+            public struct DISPLAY_DEVICE {
+                public int cb;
+                [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+                public string DeviceName;
+                [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+                public string DeviceString;
+                public int StateFlags;
+                [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+                public string DeviceID;
+                [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+                public string DeviceKey;
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            public struct DEVMODE {
+                [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+                public string dmDeviceName;
+                public short dmSpecVersion;
+                public short dmDriverVersion;
+                public short dmSize;
+                public short dmDriverExtra;
+                public int dmFields;
+                public int dmPositionX;
+                public int dmPositionY;
+                public int dmDisplayOrientation;
+                public int dmDisplayFixedOutput;
+                public short dmColor;
+                public short dmDuplex;
+                public short dmYResolution;
+                public short dmTTOption;
+                public short dmCollate;
+                [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+                public string dmFormName;
+                public short dmLogPixels;
+                public int dmBitsPerPel;
+                public int dmPelsWidth;
+                public int dmPelsHeight;
+                public int dmDisplayFlags;
+                public int dmDisplayFrequency;
+                public int dmICMMethod;
+                public int dmICMIntent;
+                public int dmMediaType;
+                public int dmDitherType;
+                public int dmReserved1;
+                public int dmReserved2;
+                public int dmPanningWidth;
+                public int dmPanningHeight;
+            }
+        }
+"@
+}
+
+function Get-ActiveDisplayDevices {
+    # Get all active display devices
+    $devices = @()
+    
+    try {
+        # Check if EnumDisplayDevices method exists (may not if type was loaded from old version)
+        $method = [DisplayHelper].GetMethod('EnumDisplayDevices')
+        if (-not $method) {
+            Write-Verbose "EnumDisplayDevices not available, using default device"
+            return @($null)
+        }
+        
+        $devNum = 0
+        while ($true) {
+            $displayDevice = New-Object DisplayHelper+DISPLAY_DEVICE
+            $displayDevice.cb = [Runtime.InteropServices.Marshal]::SizeOf($displayDevice)
+            
+            if ([DisplayHelper]::EnumDisplayDevices($null, $devNum, [ref]$displayDevice, 0)) {
+                # Check if display is attached and active (StateFlags & 0x00000001 = DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)
+                if (($displayDevice.StateFlags -band 0x00000001) -ne 0) {
+                    $devices += $displayDevice.DeviceName
+                }
+                $devNum++
+            } else {
+                break
+            }
+        }
+    } catch {
+        Write-Verbose "Could not enumerate display devices: $_"
+        # Fallback to default device (primary display)
+        return @($null)
+    }
+    
+    # If no devices found, return null for primary display
+    if ($devices.Count -eq 0) {
+        return @($null)
+    }
+    
+    return $devices
+}
+
 function Get-DisplayInformation {
     Write-Host "$(Get-Emoji TV) Detecting connected displays..." -ForegroundColor Green
 
     $displays = @()
+    $script:ActiveDisplayDevices = Get-ActiveDisplayDevices
 
     try {
         # Get monitor information from WMI
@@ -114,11 +223,17 @@ function Get-DisplayInformation {
         Add-Type -AssemblyName System.Windows.Forms
         $screens = [System.Windows.Forms.Screen]::AllScreens
 
+        # Get current refresh rate using DisplayHelper
+        $currentMode = New-Object DisplayHelper+DEVMODE
+        $currentMode.dmSize = [Runtime.InteropServices.Marshal]::SizeOf($currentMode)
+        [DisplayHelper]::EnumDisplaySettings($null, -1, [ref]$currentMode) | Out-Null
+
         for ($i = 0; $i -lt $screens.Count; $i++) {
             if ($i -lt $displays.Count) {
                 $displays[$i].CurrentResolution = "$($screens[$i].Bounds.Width)x$($screens[$i].Bounds.Height)"
                 $displays[$i].BitsPerPixel = $screens[$i].BitsPerPixel
                 $displays[$i].Primary = $screens[$i].Primary
+                $displays[$i].RefreshRate = "$($currentMode.dmDisplayFrequency)Hz"
             }
         }
 
@@ -127,7 +242,7 @@ function Get-DisplayInformation {
         foreach ($display in $displays) {
             Write-Host "  - $($display.FriendlyName)" -ForegroundColor White
             Write-Host "    Manufacturer: $($display.Manufacturer)" -ForegroundColor Gray
-            Write-Host "    Current: $($display.CurrentResolution)" -ForegroundColor Gray
+            Write-Host "    Current: $($display.CurrentResolution) @ $($display.RefreshRate)" -ForegroundColor Gray
         }
 
     } catch {
@@ -167,91 +282,90 @@ function Test-ResolutionSupport {
         @{Width=2560; Height=1080; Name="UltraWide"}
     )
 
-    Add-Type @"
-        using System;
-        using System.Runtime.InteropServices;
+    # Get current resolution
+    $currentMode = New-Object DisplayHelper+DEVMODE
+    $currentMode.dmSize = [Runtime.InteropServices.Marshal]::SizeOf($currentMode)
+    [DisplayHelper]::EnumDisplaySettings($null, -1, [ref]$currentMode) | Out-Null
+    $currentWidth = $currentMode.dmPelsWidth
+    $currentHeight = $currentMode.dmPelsHeight
 
-        public class DisplayHelper {
-            [DllImport("user32.dll")]
-            public static extern int EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
+    # Get all available display modes from all active displays
+    $availableModes = @()
+    $uniqueResolutions = @()
+    
+    try {
+        # Query all active display devices
+        $displayDevices = if ($script:ActiveDisplayDevices) { $script:ActiveDisplayDevices } else { @($null) }
+        
+        foreach ($deviceName in $displayDevices) {
+            $devMode = New-Object DisplayHelper+DEVMODE
+            $devMode.dmSize = [Runtime.InteropServices.Marshal]::SizeOf($devMode)
+            $modeNum = 0
 
-            [StructLayout(LayoutKind.Sequential)]
-            public struct DEVMODE {
-                [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
-                public string dmDeviceName;
-                public short dmSpecVersion;
-                public short dmDriverVersion;
-                public short dmSize;
-                public short dmDriverExtra;
-                public int dmFields;
-                public int dmPositionX;
-                public int dmPositionY;
-                public int dmDisplayOrientation;
-                public int dmDisplayFixedOutput;
-                public short dmColor;
-                public short dmDuplex;
-                public short dmYResolution;
-                public short dmTTOption;
-                public short dmCollate;
-                [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
-                public string dmFormName;
-                public short dmLogPixels;
-                public int dmBitsPerPel;
-                public int dmPelsWidth;
-                public int dmPelsHeight;
-                public int dmDisplayFlags;
-                public int dmDisplayFrequency;
-                public int dmICMMethod;
-                public int dmICMIntent;
-                public int dmMediaType;
-                public int dmDitherType;
-                public int dmReserved1;
-                public int dmReserved2;
-                public int dmPanningWidth;
-                public int dmPanningHeight;
+            while ([DisplayHelper]::EnumDisplaySettings($deviceName, $modeNum, [ref]$devMode) -ne 0) {
+                $availableModes += @{
+                    Width = $devMode.dmPelsWidth
+                    Height = $devMode.dmPelsHeight
+                    Frequency = $devMode.dmDisplayFrequency
+                    BitsPerPixel = $devMode.dmBitsPerPel
+                }
+                
+                $resKey = "$($devMode.dmPelsWidth)x$($devMode.dmPelsHeight)"
+                if ($resKey -notin $uniqueResolutions) {
+                    $uniqueResolutions += $resKey
+                }
+                
+                $modeNum++
             }
         }
-"@ -ErrorAction SilentlyContinue
-
-    # Get all available display modes
-    $availableModes = @()
-    $devMode = New-Object DisplayHelper+DEVMODE
-    $devMode.dmSize = [Runtime.InteropServices.Marshal]::SizeOf($devMode)
-    $modeNum = 0
-
-    while ([DisplayHelper]::EnumDisplaySettings($null, $modeNum, [ref]$devMode) -ne 0) {
-        $availableModes += @{
-            Width = $devMode.dmPelsWidth
-            Height = $devMode.dmPelsHeight
-            Frequency = $devMode.dmDisplayFrequency
-            BitsPerPixel = $devMode.dmBitsPerPel
-        }
-        $modeNum++
+    } catch {
+        Write-Warning "Error enumerating display modes: $_"
+        $testResult.Passed = $false
     }
 
-    foreach ($resolution in $standardResolutions) {
-        Write-Host "  Testing $($resolution.Name) ($($resolution.Width)x$($resolution.Height))..." -NoNewline
+    # Check if only current resolution is available
+    if ($uniqueResolutions.Count -le 1) {
+        Write-Host "  Only one resolution detected: ${currentWidth}x${currentHeight}" -ForegroundColor Yellow
+        Write-Host "  Skipping resolution testing (display does not support multiple resolutions)" -ForegroundColor Gray
+        
+        $testResult.ResolutionsTested += @{
+            Note = "Only single resolution available"
+            CurrentResolution = "${currentWidth}x${currentHeight}"
+        }
+    } else {
+        # Test standard resolutions only if multiple are available
+        $supportedCount = 0
+        foreach ($resolution in $standardResolutions) {
+            Write-Host "  Testing $($resolution.Name) ($($resolution.Width)x$($resolution.Height))..." -NoNewline
 
-        $supported = $availableModes | Where-Object {
-            $_.Width -eq $resolution.Width -and $_.Height -eq $resolution.Height
+            $supported = $availableModes | Where-Object {
+                $_.Width -eq $resolution.Width -and $_.Height -eq $resolution.Height
+            }
+
+            if ($supported) {
+                Write-Host " $(Get-Emoji CheckMark) Supported" -ForegroundColor Green
+                $supportedCount++
+                $testResult.ResolutionsTested += @{
+                    Resolution = "$($resolution.Width)x$($resolution.Height)"
+                    Name = $resolution.Name
+                    Supported = $true
+                    AvailableRefreshRates = ($supported | Select-Object -ExpandProperty Frequency -Unique)
+                }
+            } else {
+                Write-Host " $(Get-Emoji BallotX) Not supported" -ForegroundColor Yellow
+                $testResult.ResolutionsTested += @{
+                    Resolution = "$($resolution.Width)x$($resolution.Height)"
+                    Name = $resolution.Name
+                    Supported = $false
+                }
+            }
         }
 
-        if ($supported) {
-            Write-Host " $(Get-Emoji CheckMark) Supported" -ForegroundColor Green
-            $testResult.ResolutionsTested += @{
-                Resolution = "$($resolution.Width)x$($resolution.Height)"
-                Name = $resolution.Name
-                Supported = $true
-                AvailableRefreshRates = ($supported | Select-Object -ExpandProperty Frequency -Unique)
-            }
-        } else {
-            Write-Host " $(Get-Emoji BallotX) Not supported" -ForegroundColor Red
-            $testResult.ResolutionsTested += @{
-                Resolution = "$($resolution.Width)x$($resolution.Height)"
-                Name = $resolution.Name
-                Supported = $false
-            }
+        # Show summary of available resolutions
+        if ($supportedCount -eq 0 -and $availableModes.Count -gt 0) {
+            Write-Host "  Note: No standard resolutions supported, but display modes were detected" -ForegroundColor Yellow
         }
+        Write-Host "  Total unique resolutions available: $($uniqueResolutions.Count)" -ForegroundColor Gray
     }
 
     $script:TestResults.Tests += $testResult
@@ -270,38 +384,70 @@ function Test-RefreshRates {
 
     $standardRates = @(60, 75, 120, 144, 165, 240)
 
-    # Get available refresh rates
-    $devMode = New-Object DisplayHelper+DEVMODE
-    $devMode.dmSize = [Runtime.InteropServices.Marshal]::SizeOf($devMode)
-    $modeNum = 0
-
+    # Get available refresh rates from all active displays
     $availableRates = @()
-    while ([DisplayHelper]::EnumDisplaySettings($null, $modeNum, [ref]$devMode) -ne 0) {
-        if ($devMode.dmDisplayFrequency -notin $availableRates) {
-            $availableRates += $devMode.dmDisplayFrequency
-        }
-        $modeNum++
-    }
+    
+    try {
+        # Query all active display devices
+        $displayDevices = if ($script:ActiveDisplayDevices) { $script:ActiveDisplayDevices } else { @($null) }
+        
+        foreach ($deviceName in $displayDevices) {
+            $devMode = New-Object DisplayHelper+DEVMODE
+            $devMode.dmSize = [Runtime.InteropServices.Marshal]::SizeOf($devMode)
+            $modeNum = 0
 
-    foreach ($rate in $standardRates) {
-        Write-Host "  Testing ${rate}Hz..." -NoNewline
-
-        if ($rate -in $availableRates) {
-            Write-Host " $(Get-Emoji CheckMark) Supported" -ForegroundColor Green
-            $testResult.RefreshRatesTested += @{
-                RefreshRate = "${rate}Hz"
-                Supported = $true
-            }
-        } else {
-            Write-Host " $(Get-Emoji BallotX) Not supported" -ForegroundColor Yellow
-            $testResult.RefreshRatesTested += @{
-                RefreshRate = "${rate}Hz"
-                Supported = $false
+            while ([DisplayHelper]::EnumDisplaySettings($deviceName, $modeNum, [ref]$devMode) -ne 0) {
+                if ($devMode.dmDisplayFrequency -gt 0 -and $devMode.dmDisplayFrequency -notin $availableRates) {
+                    $availableRates += $devMode.dmDisplayFrequency
+                }
+                $modeNum++
             }
         }
+    } catch {
+        Write-Warning "Error enumerating refresh rates: $_"
+        $testResult.Passed = $false
     }
 
-    Write-Host "  Available rates: $($availableRates -join ', ')Hz" -ForegroundColor Gray
+    # Get current refresh rate
+    $currentMode = New-Object DisplayHelper+DEVMODE
+    $currentMode.dmSize = [Runtime.InteropServices.Marshal]::SizeOf($currentMode)
+    [DisplayHelper]::EnumDisplaySettings($null, -1, [ref]$currentMode) | Out-Null
+    $currentRate = $currentMode.dmDisplayFrequency
+
+    # Check if there are multiple refresh rates available
+    if ($availableRates.Count -le 1) {
+        $displayRate = if ($currentRate -gt 0) { "${currentRate}Hz" } else { "Unknown" }
+        Write-Host "  Only one refresh rate detected: $displayRate" -ForegroundColor Yellow
+        Write-Host "  Skipping refresh rate testing (display does not support multiple rates)" -ForegroundColor Gray
+        
+        $testResult.RefreshRatesTested += @{
+            Note = "Only single refresh rate available"
+            AvailableRate = $displayRate
+        }
+    } else {
+        # Test standard rates only if multiple rates are available
+        $supportedCount = 0
+        foreach ($rate in $standardRates) {
+            Write-Host "  Testing ${rate}Hz..." -NoNewline
+
+            if ($rate -in $availableRates) {
+                Write-Host " $(Get-Emoji CheckMark) Supported" -ForegroundColor Green
+                $supportedCount++
+                $testResult.RefreshRatesTested += @{
+                    RefreshRate = "${rate}Hz"
+                    Supported = $true
+                }
+            } else {
+                Write-Host " $(Get-Emoji BallotX) Not supported" -ForegroundColor Yellow
+                $testResult.RefreshRatesTested += @{
+                    RefreshRate = "${rate}Hz"
+                    Supported = $false
+                }
+            }
+        }
+
+        Write-Host "  Available rates: $($availableRates | Sort-Object | ForEach-Object { "${_}Hz" }) " -ForegroundColor Gray
+    }
 
     $script:TestResults.Tests += $testResult
     return $testResult
@@ -508,6 +654,12 @@ function Show-TestReport {
         Write-Host "`n  - $($test.TestName)"
         Write-Host "    Status: " -NoNewline
         Write-Host $status -ForegroundColor $statusColor
+        
+        # Add informational message for bandwidth analysis
+        if ($test.TestName -eq "Bandwidth Analysis") {
+            Write-Host "    Note: See bandwidth analysis section above" -ForegroundColor Gray
+        }
+        
         Write-Host "    Time: $($test.Timestamp)"
     }
 
